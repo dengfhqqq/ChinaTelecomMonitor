@@ -2,8 +2,12 @@
 # -*- coding: utf-8 -*-
 # Repo: https://github.com/Cp0204/ChinaTelecomMonitor
 # ConfigFile: telecom_config.json
-# Modify: 2025-09-23（多账号版）
-#此版本是ai修改，只是为了方便查询多个号码而进行相应改版。
+# Modify: 2025-09-24（多账号版 + 固定批次推送）
+# 此版本是AI修改，支持多账号查询及批次推送控制
+# 核心规则：
+# 1. 未设置 TELECOM_BATCH_SIZE 环境变量时，默认每次推送1个账号结果
+# 2. 设置环境变量时，仅支持值为1或2（值为2时正常推送，值≥3时报错提醒，需自行研究适配）
+# 3. 环境变量值无效时（如非数字），自动 fallback 到默认1个/批
 
 """
 任务名称
@@ -28,9 +32,35 @@ except:
 
 
 CONFIG_DATA = {}
-NOTIFYS = []
+NOTIFYS = []  # 存储所有账号的通知内容
 CONFIG_PATH = sys.argv[1] if len(sys.argv) > 1 else "telecom_config.json"
 TELECOM_FLUX_PACKAGE = os.environ.get("TELECOM_FLUX_PACKAGE", "true").lower() != "false"
+
+# 初始化批次大小：优先读取环境变量，按规则处理
+TELECOM_BATCH_SIZE = 1  # 默认值：每次1个账号
+batch_env = os.environ.get("TELECOM_BATCH_SIZE")  # 读取环境变量
+
+if batch_env is not None:
+    try:
+        batch_val = int(batch_env)
+        if batch_val == 1:
+            TELECOM_BATCH_SIZE = 1
+            print(f"✅ 检测到环境变量 TELECOM_BATCH_SIZE={batch_val}，每次推送1个账号")
+        elif batch_val == 2:
+            TELECOM_BATCH_SIZE = 2
+            print(f"✅ 检测到环境变量 TELECOM_BATCH_SIZE={batch_val}，每次推送2个账号（已知正常）")
+        else:
+            # 值≥3时，强制用默认1个/批，并给出报错提醒
+            TELECOM_BATCH_SIZE = 1
+            print(f"❌ 检测到环境变量 TELECOM_BATCH_SIZE={batch_val}，超出支持范围（仅支持1/2）")
+            print(f"❌ 已知：值≥3（如4）会导致Bark推送报错，当前自动 fallback 到默认1个/批")
+            print(f"❌ 若需推送更多账号，需自行研究适配（如简化推送内容、拆分更多批次）")
+    except:
+        # 环境变量非数字时，用默认值
+        TELECOM_BATCH_SIZE = 1
+        print(f"❌ 环境变量 TELECOM_BATCH_SIZE={batch_env} 格式无效（需为数字1/2），自动 fallback 到默认1个/批")
+else:
+    print(f"ℹ️ 未检测到 TELECOM_BATCH_SIZE 环境变量，默认每次推送1个账号")
 
 
 # 发送通知消息
@@ -45,11 +75,10 @@ def send_notify(title, body):
             notify.push_config["CONSOLE"] = notify.push_config.get("CONSOLE", True)
         notify.send(title, body)
     except Exception as e:
-        if e:
-            print("发送通知消息失败！")
+        print(f"发送通知消息失败：{str(e)}")
 
 
-# 添加消息
+# 添加消息（仅存储，不立即发送）
 def add_notify(text):
     global NOTIFYS
     NOTIFYS.append(text)
@@ -199,10 +228,11 @@ def process_account(phonenum, password):
 
 
 def main():
-    global CONFIG_DATA
+    global CONFIG_DATA, NOTIFYS
     start_time = datetime.datetime.now()
     print(f"===============程序开始===============")
     print(f"⏰ 执行时间: {start_time.strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"📦 当前推送批次大小: {TELECOM_BATCH_SIZE}个账号/次")
     print()
     
     # 读取配置
@@ -239,13 +269,26 @@ def main():
         print(f"\n===== 开始处理账号：{phonenum} =====")
         process_account(phonenum, password)
     
-    # 发送汇总通知
+    # 按批次发送通知
     if NOTIFYS:
-        notify_body = "\n".join(NOTIFYS)
+        total_batches = (len(NOTIFYS) + TELECOM_BATCH_SIZE - 1) // TELECOM_BATCH_SIZE
         print(f"\n===============推送通知===============")
-        send_notify("【电信套餐用量监控 - 多账号汇总】", notify_body)
-        print()
-
+        print(f"共{len(NOTIFYS)}条信息，分{total_batches}批推送（每批{TELECOM_BATCH_SIZE}个账号）")
+        
+        for i in range(total_batches):
+            # 计算当前批次的起始和结束索引
+            start_idx = i * TELECOM_BATCH_SIZE
+            end_idx = start_idx + TELECOM_BATCH_SIZE
+            batch_notifies = NOTIFYS[start_idx:end_idx]
+            
+            # 构建批次标题和内容（包含批次信息，方便区分）
+            batch_title = f"【电信套餐监控】第{i+1}/{total_batches}批"
+            batch_body = "\n".join(batch_notifies)
+            
+            # 发送当前批次
+            print(f"正在发送第{i+1}批通知...")
+            send_notify(batch_title, batch_body)
+    
     update_config()
     print(f"\n===============程序结束===============")
     print(f"⏰ 结束时间: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
