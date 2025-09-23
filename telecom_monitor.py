@@ -1,12 +1,13 @@
-# !/usr/bin/env python3
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # Repo: https://github.com/Cp0204/ChinaTelecomMonitor
 # ConfigFile: telecom_config.json
-# Modify: 2025-07-08
+# Modify: 2025-09-23（多账号版）
+#此版本是ai修改，只是为了方便查询多个号码而进行相应改版。
 
 """
 任务名称
-name: 电信套餐用量监控
+name: 电信套餐用量监控（多账号版）
 定时规则
 cron: 0 20 * * *
 """
@@ -75,112 +76,85 @@ def usage_status_icon(used, total):
         return "🟢"  # 均匀使用范围内
 
 
-def main():
-    global CONFIG_DATA
-    start_time = datetime.datetime.now()
-    print(f"===============程序开始===============")
-    print(f"⏰ 执行时间: {start_time.strftime('%Y-%m-%d %H:%M:%S')}")
-    print()
-    # 读取配置
-    if os.path.exists(CONFIG_PATH):
-        print(f"⚙️ 正从 {CONFIG_PATH} 文件中读取配置")
-        with open(CONFIG_PATH, "r", encoding="utf-8") as file:
-            CONFIG_DATA = json.load(file)
-    if not CONFIG_DATA.get("user"):
-        CONFIG_DATA["user"] = {}
-
+def process_account(phonenum, password):
+    """处理单个账号的查询和通知"""
+    # 为每个账号创建独立的Telecom实例
     telecom = Telecom()
-
-    def auto_login():
-        if TELECOM_USER := os.environ.get("TELECOM_USER"):
-            phonenum, password = (
-                TELECOM_USER[:11],
-                TELECOM_USER[11:],
+    
+    # 登录失败次数记录，按号码区分
+    login_fail_key = f"loginFailTime_{phonenum}"
+    login_fail_time = CONFIG_DATA.get(login_fail_key, 0)
+    
+    # 尝试登录
+    if login_fail_time < 5:
+        print(f"登录账号：{phonenum}")
+        data = telecom.do_login(phonenum, password)
+        if data.get("responseData", {}).get("resultCode") == "0000":
+            print(f"登录成功：{phonenum}")
+            login_info = data["responseData"]["data"]["loginSuccessResult"]
+            login_info["phonenum"] = phonenum
+            login_info["password"] = password  # 保存密码用于重新登录
+            login_info["createTime"] = datetime.datetime.now().strftime(
+                "%Y-%m-%d %H:%M:%S"
             )
-        elif TELECOM_USER := CONFIG_DATA.get("user", {}):
-            phonenum, password = (
-                TELECOM_USER.get("phonenum", ""),
-                TELECOM_USER.get("password", ""),
-            )
+            # 按号码保存登录信息
+            CONFIG_DATA[f"login_info_{phonenum}"] = login_info
+            CONFIG_DATA[login_fail_key] = 0
+            telecom.set_login_info(login_info)
         else:
-            exit("自动登录：未设置账号密码，退出")
-        if not phonenum.isdigit():
-            exit("自动登录：手机号设置错误，退出")
-        else:
-            print(f"自动登录：{phonenum}")
-        # 记录登录失败次数，避免风控
-        login_fail_time = CONFIG_DATA.get("loginFailTime", 0)
-        if login_fail_time < 5:
-            data = telecom.do_login(phonenum, password)
-            if data.get("responseData").get("resultCode") == "0000":
-                print(f"自动登录：成功")
-                login_info = data["responseData"]["data"]["loginSuccessResult"]
-                login_info["phonenum"] = phonenum
-                login_info["createTime"] = datetime.datetime.now().strftime(
-                    "%Y-%m-%d %H:%M:%S"
-                )
-                CONFIG_DATA["login_info"] = login_info
-                CONFIG_DATA["loginFailTime"] = 0
-                telecom.set_login_info(login_info)
-            else:
-                login_fail_time = int(
-                    data.get("responseData", {})
-                    .get("data", {})
-                    .get("loginFailResult", {})
-                    .get("loginFailTime", login_fail_time + 1)
-                )
-                CONFIG_DATA["loginFailTime"] = login_fail_time
-                update_config()
-                add_notify(f"自动登录：已连续失败{login_fail_time}次，程序退出")
-                exit(data)
-        else:
-            print(
-                f"自动登录：已连续失败{login_fail_time}次，为避免风控不再执行；修正登录信息后，如需重新登录请删除程序目录下(.json)配置中的 loginFailTime 键值"
-            )
-            exit()
-
-    # 读取缓存Token
-    login_info = CONFIG_DATA.get("login_info", {})
-    if login_info and login_info.get("phonenum"):
-        print(f"尝试使用缓存登录：{login_info['phonenum']}")
-        telecom.set_login_info(login_info)
+            login_fail_time += 1
+            CONFIG_DATA[login_fail_key] = login_fail_time
+            update_config()
+            add_notify(f"登录失败：{phonenum}，已连续失败{login_fail_time}次")
+            return False
     else:
-        auto_login()
+        add_notify(f"登录受限：{phonenum}已连续失败{login_fail_time}次，为避免风控暂不执行")
+        return False
 
     # 获取主要信息
     important_data = telecom.qry_important_data()
     if important_data.get("responseData"):
-        print(f"获取主要信息：成功")
+        print(f"获取信息成功：{phonenum}")
     elif important_data["headerInfos"]["code"] == "X201":
-        print(f"获取主要信息：失败 {important_data['headerInfos']['reason']}")
-        auto_login()
-        important_data = telecom.qry_important_data()
+        print(f"信息获取失败，尝试重新登录：{phonenum}")
+        # 重新登录
+        data = telecom.do_login(phonenum, password)
+        if data.get("responseData", {}).get("resultCode") == "0000":
+            login_info = data["responseData"]["data"]["loginSuccessResult"]
+            login_info["phonenum"] = phonenum
+            login_info["password"] = password
+            CONFIG_DATA[f"login_info_{phonenum}"] = login_info
+            telecom.set_login_info(login_info)
+            important_data = telecom.qry_important_data()
+        else:
+            add_notify(f"重新登录失败，无法获取信息：{phonenum}")
+            return False
 
-    # 简化主要信息
+    # 处理信息
     try:
         summary = telecom.to_summary(important_data["responseData"]["data"])
     except Exception as e:
-        exit(
-            f"简化主要信息出错，提 Issue 请提供以下信息（隐私打码）：\n\n{json.dumps(important_data['responseData']['data'], ensure_ascii=False)}\n\n{e}"
-        )
+        add_notify(f"处理数据出错：{phonenum} - {str(e)}")
+        return False
+        
     if summary:
-        print(f"简化主要信息：{summary}")
-        CONFIG_DATA["summary"] = summary
+        print(f"处理完成：{phonenum}")
+        CONFIG_DATA[f"summary_{phonenum}"] = summary
 
     # 获取流量包明细
+    flux_package_str = ""
     if TELECOM_FLUX_PACKAGE:
-        flux_package_str = ""
         user_flux_package = telecom.user_flux_package()
-        if user_flux_package:
-            print("获取流量包明细：成功")
+        if user_flux_package and user_flux_package.get("responseData"):
+            print(f"获取流量包明细：{phonenum}")
             packages = user_flux_package["responseData"]["data"]["productOFFRatable"][
                 "ratableResourcePackages"
             ]
             for package in packages:
                 package_icon = (
-                    "🇨🇳"
-                    if "国内" in package["title"]
-                    else "📺" if "专用" in package["title"] else "🌎"
+                    "🇨🇳" if "国内" in package["title"] 
+                    else "📺" if "专用" in package["title"] 
+                    else "🌎"
                 )
                 flux_package_str += f"\n{package_icon}{package['title']}\n"
                 for product in package["productInfos"]:
@@ -208,27 +182,74 @@ def main():
     # 基本信息
     notify_str = f"""
 📱 手机：{summary['phonenum']}
-💰 余额：{round(summary['balance']/100,2)}
-📞 通话：{summary['voiceUsage']}{f" / {summary['voiceTotal']}" if summary['voiceTotal']>0 else ''} min
+💰 余额：{round(summary['balance']/100,2)}元
+📞 通话：{summary['voiceUsage']}{f" / {summary['voiceTotal']}" if summary['voiceTotal']>0 else ''} 分钟
 🌐 总流量
   - 通用：{common_str}{f'{chr(10)}  - 专用：{special_str}' if special_str else ''}"""
 
     # 流量包明细
-    if TELECOM_FLUX_PACKAGE:
+    if TELECOM_FLUX_PACKAGE and flux_package_str:
         notify_str += f"\n\n【流量包明细】\n\n{flux_package_str.strip()}"
 
     notify_str += f"\n\n查询时间：{summary['createTime']}"
+    notify_str += "\n" + "="*30  # 分隔不同账号的信息
 
     add_notify(notify_str.strip())
+    return True
 
-    # 通知
+
+def main():
+    global CONFIG_DATA
+    start_time = datetime.datetime.now()
+    print(f"===============程序开始===============")
+    print(f"⏰ 执行时间: {start_time.strftime('%Y-%m-%d %H:%M:%S')}")
+    print()
+    
+    # 读取配置
+    if os.path.exists(CONFIG_PATH):
+        print(f"⚙️ 正从 {CONFIG_PATH} 文件中读取配置")
+        with open(CONFIG_PATH, "r", encoding="utf-8") as file:
+            CONFIG_DATA = json.load(file)
+    
+    # 获取多账号信息
+    telecom_users = os.environ.get("TELECOM_USER", "")
+    if not telecom_users:
+        exit("未设置TELECOM_USER环境变量，程序退出")
+        
+    # 分割多账号，用&分隔
+    accounts = telecom_users.split("&")
+    valid_accounts = []
+    
+    # 验证账号格式
+    for account in accounts:
+        if len(account) == 17 and account[:11].isdigit() and account[11:].isdigit():
+            phonenum = account[:11]
+            password = account[11:]
+            valid_accounts.append((phonenum, password))
+        else:
+            add_notify(f"账号格式错误：{account}，应为11位号码+6位密码")
+    
+    if not valid_accounts:
+        exit("没有有效的账号信息，程序退出")
+    
+    print(f"共发现{len(valid_accounts)}个有效账号，开始处理...")
+    
+    # 逐个处理账号
+    for phonenum, password in valid_accounts:
+        print(f"\n===== 开始处理账号：{phonenum} =====")
+        process_account(phonenum, password)
+    
+    # 发送汇总通知
     if NOTIFYS:
         notify_body = "\n".join(NOTIFYS)
-        print(f"===============推送通知===============")
-        send_notify("【电信套餐用量监控】", notify_body)
+        print(f"\n===============推送通知===============")
+        send_notify("【电信套餐用量监控 - 多账号汇总】", notify_body)
         print()
 
     update_config()
+    print(f"\n===============程序结束===============")
+    print(f"⏰ 结束时间: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"⏱️  运行时长: {datetime.datetime.now() - start_time}")
 
 
 def update_config():
