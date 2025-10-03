@@ -107,13 +107,13 @@ def usage_status_icon(used, total):
 
 def compare_and_format_diff(current_summary, last_summary):
     """
-    计算本次数据与上次数据的差值，并格式化成字符串。
+    计算本次数据与上次数据的差值，并返回格式化后的短字符串。
     
-    注意：流量和话费的消耗都是用 “上次余额” - “本次余额” 计算的。
+    返回: (fee_diff_str, data_diff_str)
     """
-    diff_info = ""
-    data_used_MB = 0.0
-    fee_used_CNY = 0.0
+    # 默认值，在无法对比或首次运行时使用
+    fee_diff_str = ""
+    data_diff_str = ""
     
     # 尝试计算时间间隔
     time_diff_hours = "N/A"
@@ -123,39 +123,41 @@ def compare_and_format_diff(current_summary, last_summary):
         time_delta = current_time - last_time
         time_diff_hours = round(time_delta.total_seconds() / 3600, 1)
         
-        # 防止时间倒流的异常情况
         if time_diff_hours < 0:
             time_diff_hours = "N/A"
-            diff_info += "⚠️ 上次查询时间晚于本次，跳过差值计算。\n"
 
     except Exception as e:
-        print(f"警告：计算时间差出错：{e}")
+        # print(f"警告：计算时间差出错：{e}")
+        pass # 静默处理时间解析错误
 
 
     if time_diff_hours != "N/A":
         # 话费对比 (余额)
-        # 消耗话费 = (上次余额 - 本次余额) / 100 (单位转换)
         last_fee = last_summary.get('balance', 0) / 100
         current_fee = current_summary.get('balance', 0) / 100
         fee_used_CNY = round(last_fee - current_fee, 2)
         
         # 流量对比 (通用流量，单位 MB)
-        # 流量数据在 to_summary 中已经是 MB 为单位
-        # 消耗流量 = (上次通用总流量 - 上次通用已用) - (本次通用总流量 - 本次通用已用)
-        # commonTotal是总流量，commonUse是已用流量
         last_common_left_MB = last_summary.get('commonTotal', 0) - last_summary.get('commonUse', 0)
         current_common_left_MB = current_summary.get('commonTotal', 0) - current_summary.get('commonUse', 0)
-        
-        # 如果流量包发生变化 (commonTotal 变化)，计算的消耗量可能不准确，这里以余额变化为准
         data_used_MB = round(last_common_left_MB - current_common_left_MB, 2)
         
-        # 格式化输出
-        diff_info += f"\n--- 较上次 ({time_diff_hours}小时前) ---"
-        # 流量消耗转换为 GB，方便阅读
-        diff_info += f"\n💧 **流量消耗**：{round(data_used_MB / 1024, 2)} GB ({data_used_MB} MB)"
-        diff_info += f"\n💰 **话费消耗**：{fee_used_CNY} 元"
+        # --- 新的格式化输出 ---
+        
+        # 话费消耗：显示总消耗和消耗速率 (元/小时)
+        if time_diff_hours > 0:
+            fee_per_hour = round(fee_used_CNY / time_diff_hours, 2)
+            # 格式：(↓总消耗元/小时消耗元)
+            fee_diff_str = f" (↓{fee_used_CNY}元/{fee_per_hour}元/h)" 
+        else:
+            fee_diff_str = f" (↓{fee_used_CNY}元)"
 
-    return diff_info, data_used_MB, fee_used_CNY
+        # 流量消耗：显示总消耗（转换为 GB）
+        data_used_GB = round(data_used_MB / 1024, 2)
+        # 格式：(↓总消耗 GB)
+        data_diff_str = f" (↓{data_used_GB} GB)"
+        
+    return fee_diff_str, data_diff_str
 
 
 def process_account(phonenum, password):
@@ -218,7 +220,7 @@ def process_account(phonenum, password):
     # 处理信息
     try:
         summary = telecom.to_summary(important_data["responseData"]["data"])
-        # 【关键修改】：在这里更新本次数据的创建时间
+        # 更新本次数据的创建时间
         summary["createTime"] = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S') 
     except Exception as e:
         add_notify(f"处理数据出错：{phonenum} - {str(e)}")
@@ -228,13 +230,12 @@ def process_account(phonenum, password):
         print(f"处理完成：{phonenum}")
         
         # =======================================================
-        # 【新增逻辑 1】：对比并计算差值
+        # 【新增逻辑 1】：对比并计算差值 (修改了返回值接收)
         # =======================================================
-        diff_str = ""
+        fee_diff_str = ""
+        data_diff_str = ""
         if last_summary:
-            diff_str, _, _ = compare_and_format_diff(summary, last_summary)
-        else:
-            diff_str = "\n(本次为首次运行，或上次数据丢失，无法显示对比差值。)"
+            fee_diff_str, data_diff_str = compare_and_format_diff(summary, last_summary)
             
         # 【新增逻辑 2】：保存本次summary数据为下次的对比基础
         CONFIG_DATA[f"summary_{phonenum}"] = summary
@@ -280,20 +281,18 @@ def process_account(phonenum, password):
     )
 
     # 基本信息
+    # 【关键修改】：将 fee_diff_str 和 data_diff_str 插入到通知中
     notify_str = f"""
 📱 手机：{summary['phonenum']}
-💰 余额：{round(summary['balance']/100,2)}元
+💰 余额：{round(summary['balance']/100,2)}元{fee_diff_str}
 📞 通话：{summary['voiceUsage']}{f" / {summary['voiceTotal']}" if summary['voiceTotal']>0 else ''} 分钟
 🌐 总流量
-  - 通用：{common_str}{f'{chr(10)}  - 专用：{special_str}' if special_str else ''}"""
+  - 通用：{common_str}{data_diff_str}{f'{chr(10)}  - 专用：{special_str}' if special_str else ''}"""
 
     # 流量包明细
     if TELECOM_FLUX_PACKAGE and flux_package_str:
         notify_str += f"\n\n【流量包明细】\n\n{flux_package_str.strip()}"
 
-    # 【关键修改】：将对比结果添加到通知中
-    notify_str += diff_str
-    
     notify_str += f"\n\n查询时间：{summary['createTime']}"
     notify_str += "\n" + "="*30  # 分隔不同账号的信息
 
@@ -326,7 +325,6 @@ def main():
     
     # 验证账号格式
     for account in accounts:
-        # 注意：这里假设账号格式是 11位号码 + 6位密码 = 17位
         if len(account) == 17 and account[:11].isdigit() and account[11:].isdigit():
             phonenum = account[:11]
             password = account[11:]
